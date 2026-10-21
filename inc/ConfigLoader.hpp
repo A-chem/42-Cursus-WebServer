@@ -7,7 +7,7 @@
 #include <map>
 #include <utility>
 
-struct LocationConfig {
+struct	LocationConfig {
 	std::string				path;
 	std::string				root;
 	std::string				index;
@@ -22,19 +22,17 @@ struct LocationConfig {
 	LocationConfig() : autoindex(false), client_max_body_size(0) {}
 };
 
-struct ServerConfig {
-	std::string					host;
-	int						port;
+struct	ServerConfig {
 	std::vector<std::pair<std::string, int> >	listen_sockets;
 	std::vector<std::string>			server_names;
 	size_t						client_max_body_size;
 	std::map<int, std::string>			error_pages;
 	std::vector<LocationConfig>			locations;
 
-	ServerConfig() : host("0.0.0.0"), port(80), client_max_body_size(0) {}
+	ServerConfig() : client_max_body_size(0) {}
 };
 
-class ConfigLoader {
+class	ConfigLoader {
 	private:
 		void	loadServer(ConfigNode* node, ServerConfig& conf);
 		void	loadLocation(ConfigNode* node, LocationConfig parent, std::vector<LocationConfig>& list);

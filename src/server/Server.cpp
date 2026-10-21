@@ -1,8 +1,12 @@
 #include "Server.hpp"
 #include <sstream>
+#include <sys/wait.h>
+#include <signal.h>
+
 
 Server::Server() {
 	epfd = epoll_create1(0);
+	loadMimeTypes("conf/mime.types");
 	if (epfd == -1)
 		throw std::runtime_error("epoll_create1 failed");
 }
@@ -17,12 +21,39 @@ Server::~Server() {
 	close(epfd);
 }
 
-// create listen sockets for every unique host:port for each server block in the config file 
-// also build our tracker _fd_to_config bach n3rfo which ServerConfig mlinki m3a listen fd 
-// so db kola connection ghadi nkhtaro liha server block dyalha (flowel knt mhard codi ga3 connections ikhdmo blconfig lowla )
+
+void Server::setSocketTimeout(int fd) {
+    struct timeval tv;
+    tv.tv_sec = SOCKET_TIMEOUT;
+    tv.tv_usec = 0;
+
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
 
 void	Server::setup(const std::vector<ServerConfig>& configs) {
 	_configs = configs;
+	std::map<std::string, int> default_servers;      
+	for (size_t i = 0; i < _configs.size(); i++) {
+	    if (_configs[i].server_names.empty()) {
+	        for (size_t j = 0; j < _configs[i].listen_sockets.size(); j++) {
+	            int port = _configs[i].listen_sockets[j].second;
+	            
+	            std::ostringstream oss;
+	            oss << port;
+	            std::string port_key = oss.str();
+	            
+	            default_servers[port_key]++;
+	            
+	            if (default_servers[port_key] > 1) {
+	                throw std::runtime_error(
+	                    "Error: Multiple server blocks without server_name on port " + port_key
+	                );
+	            }
+	        }
+	    }
+	}
 	std::map<std::string, int> bound;
 
 	for (size_t i = 0; i < _configs.size(); i++) {
@@ -42,8 +73,8 @@ void	Server::setup(const std::vector<ServerConfig>& configs) {
 				std::cout << "[LISTEN]" << key << " fd=" << fd << std::endl;
 			}
 			int lfd = bound[key];
-			if (_fd_to_config.find(lfd) == _fd_to_config.end())
-				_fd_to_config[lfd] = static_cast<int>(i);
+
+			_fd_to_configs[lfd].push_back(i);
 		}
 	}
 }
@@ -55,20 +86,35 @@ void	Server::acceptClients(int listen_fd) {
 			if (errno == EAGAIN || errno == EWOULDBLOCK) break;
 			return ;
 		}
+		setSocketTimeout(clientfd);
 		setNonBlocking(clientfd);
 		addToEpoll(clientfd);
 		Client* cl = new Client(clientfd);
 		cl->setListenFd(listen_fd);
+		cl->updateActivityTime();  
 		clients.insert(std::make_pair(clientfd, cl));
 		std::cout << "[ACCEPT] client fd=" << clientfd << std::endl;
 	}
 }
 
-void	Server::disconnect(int fd) {
-	epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
-	close(fd);
-	delete clients[fd];
-	clients.erase(fd);
-	std::cout << "[DISCONNECT] fd=" << fd << std::endl;
+void Server::disconnect(int fd) {
+    Client* c = clients[fd];
+    
+    if (c->cgi_pid > 0) {
+        std::cout << "[CGI] Killing stuck/abandoned CGI process PID=" << c->cgi_pid << std::endl;
+        kill(c->cgi_pid, SIGKILL);
+        waitpid(c->cgi_pid, NULL, 0); 
+    }
+    if (c->cgi_fd > 0) {
+        epoll_ctl(epfd, EPOLL_CTL_DEL, c->cgi_fd, NULL);
+        close(c->cgi_fd);
+        cgi_clients.erase(c->cgi_fd); 
+    }
+
+    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+    close(fd);
+    delete c;
+    clients.erase(fd);
+    std::cout << "[DISCONNECT] fd=" << fd << std::endl;
 }
 

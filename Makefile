@@ -1,7 +1,7 @@
 NAME    = webserv
 
 CC      = c++
-CFLAGS  = -Wall -Wextra -Werror -std=c++98 -I inc
+CFLAGS  = -Wall -Wextra -std=c++98 -I inc
 
 SRCS    = src/main.cpp \
           src/config/Lexer.cpp \

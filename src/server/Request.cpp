@@ -1,6 +1,10 @@
 #include "Server.hpp"
 #include <sstream>
+#include "Utils.hpp"
 
+const size_t MAX_REQUEST_LINE = 8192;      // 8KB
+const size_t MAX_HEADER_LINE = 8192;       // 8KB per header
+const size_t MAX_HEADERS_SIZE = 65536;     // 64KB total
 // normalize the path (hna y9dr ikon path traversal o tssd9 mkhli server yfot root so each .. ghadi nrj3o lor 7ta nwsslo root o n7bsso)
 
 static	std::string normalizePath(const std::string& path) {
@@ -56,8 +60,10 @@ static	size_t parseRequestLine(Client& c) {
 		path = rawpath.substr(0, qmark);
 		query = rawpath.substr(qmark);
 	}
-
+	path = safeUriDecode(path, 10);
+	std::cout << " path brefore normalization : -----" << path << " ---- " << std::endl;
 	std::string safe = normalizePath(path);
+	std::cout << " path after normalization (safe) : -----" << safe << " ---- " << std::endl;
 	if (safe.empty()) return std::string::npos;
 
 	c.setMethod(method);
@@ -78,6 +84,11 @@ static void parseHeaders(Client& c) {
 
 	while (std::getline(ss, line)) {
 		if (line == "\r"  || line.empty()) continue;
+		if (line.size() > MAX_HEADER_LINE) {
+			c.setErrorCode(431);
+			c.setState(PROCESS_REQUEST);
+			return;
+		}
 		size_t colon = line.find(':');
 		if (colon == std::string::npos) continue;
 
@@ -102,32 +113,49 @@ void	Server::handleRequest(int fd) {
 
 	ssize_t n = recv(fd, buf, sizeof(buf), 0);
 	if (n <= 0) {
-		if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK))
-			c.setState(CLOSED);
+		c.setState(CLOSED);
 		return ;
 	}
 	c.recvBuf().append(buf, n);
 
 	while (true) {
 		if (c.getState() == READ_REQUEST_LINE) {
+			if (c.recvBuf().size() > MAX_REQUEST_LINE) {
+				c.setErrorCode(431);
+				c.setState(PROCESS_REQUEST);
+				buildResponse(c);
+				c.setState(WRITE_RESPONSE);
+				modifyEpoll(fd, EPOLLOUT);
+				break;
+			}
 			if (c.recvBuf().find("\r\n") == std::string::npos) break;
 
 			size_t consumed = parseRequestLine(c);
 			if (consumed == std::string::npos) {
-				c.setErrorCode(400);
+				c.setErrorCode(403);
 				c.setState(PROCESS_REQUEST);
+				buildResponse(c);
+				c.setState(WRITE_RESPONSE);
+				modifyEpoll(fd, EPOLLOUT);
 				break;
 			}
-			c.recvBuf().erase(0, consumed); // mss7 consumed part 
+			c.recvBuf().erase(0, consumed);
 			c.setState(READ_REQUEST_HEADER);
 		}
 		else if (c.getState() == READ_REQUEST_HEADER) {
+			if (c.recvBuf().size() > MAX_HEADERS_SIZE) {
+				c.setErrorCode(431);
+				c.setState(PROCESS_REQUEST);
+				buildResponse(c);
+				c.setState(WRITE_RESPONSE);
+				modifyEpoll(fd, EPOLLOUT);
+				break;
+			}
 			size_t pos = c.recvBuf().find("\r\n\r\n");
 			if (pos == std::string::npos) break;
 			parseHeaders(c);
 			c.recvBuf().erase(0, pos + 4);
 
-			// keep-alive : ida kan HTTP/1.1 rah default hiya n resusiw nfs client ila ida kant connetion:close
 			std::map<std::string, std::string> hdrs = c.getHeader();
 			std::string conn = hdrs.count("Connection") ? hdrs["Connection"] : "";
 			if (c.getVersion() == "HTTP/1.1" && conn != "close")
@@ -137,31 +165,43 @@ void	Server::handleRequest(int fd) {
 			else
 				c.setKeepAlive(false);
 
-			if (hdrs.count("Content-Length")) {
+			ServerConfig* srv_ptr = NULL;
+			selectServerByHostname(c.getListenFd(),hdrs.count("Host") ? hdrs["Host"] : "localhost", srv_ptr);
+			ServerConfig& srv = *srv_ptr;
+			size_t max_body = srv.client_max_body_size;
+
+			LocationConfig* loc = NULL;
+			size_t longest = 0;
+			for (size_t i = 0; i < srv.locations.size(); i++) {
+				const std::string& lp = srv.locations[i].path;
+				if (c.getPath().find(lp) == 0 && lp.size() > longest) {
+					size_t end_idx = lp.size();
+					if (end_idx == c.getPath().size() || 
+							c.getPath()[end_idx] == '/' || 
+							lp[lp.size()-1] == '/') {
+						longest = lp.size();
+						loc = &srv.locations[i];
+					}
+				}
+			}
+			if (loc && loc->client_max_body_size > 0)
+				max_body = loc->client_max_body_size;
+
+			if (hdrs.count("Transfer-Encoding") && hdrs["Transfer-Encoding"] == "chunked") {
+				c.setIsChunked(true);
+				c.setContentLength(max_body); 
+				c.setState(READ_BODY);
+			}
+			else if (hdrs.count("Content-Length")) {
 				size_t cl = static_cast<size_t>(std::atoi(hdrs["Content-Length"].c_str()));
 				c.setContentLength(cl);
 
-				ServerConfig& srv = _configs[0];
-				size_t max_body = srv.client_max_body_size;
-				LocationConfig* loc = NULL;
-				size_t longest = 0;
-				for (size_t i = 0; i < srv.locations.size(); i++) {
-					const std::string& lp = srv.locations[i].path;
-					if (c.getPath().find(lp) == 0 && lp.size() > longest) {
-						size_t end_idx = lp.size();
-						if (end_idx == c.getPath().size() || 
-								c.getPath()[end_idx] == '/' || 
-								lp[lp.size()-1] == '/') {
-							longest = lp.size();
-							loc = &srv.locations[i];
-						}
-					}
-				}
-				if (loc && loc->client_max_body_size > 0)
-					max_body = loc->client_max_body_size;
 				if (max_body > 0 && cl > max_body) {
 					c.setErrorCode(413);
 					c.setState(PROCESS_REQUEST);
+					buildResponse(c);
+					c.setState(WRITE_RESPONSE);
+					modifyEpoll(fd, EPOLLOUT);
 					break;
 				}
 
@@ -175,19 +215,56 @@ void	Server::handleRequest(int fd) {
 			}
 		}
 		else if (c.getState() == READ_BODY) {
-			if (c.recvBuf().size() >= c.getContentLength()) {
-				c.setBody(c.recvBuf().substr(0, c.getContentLength()));
-				c.recvBuf().erase(0, c.getContentLength());
-				c.setState(PROCESS_REQUEST);
+			if (c.getIsChunked()) {
+				while (true) {
+					size_t crlf = c.recvBuf().find("\r\n");
+					if (crlf == std::string::npos) break; 
+
+					std::string hex_str = c.recvBuf().substr(0, crlf);
+					char* endptr;
+					long chunk_size = std::strtol(hex_str.c_str(), &endptr, 16);
+
+					if (c.recvBuf().size() < crlf + 2 + chunk_size + 2) break; 
+
+					if (c.getContentLength() > 0 && c.getBody().size() + chunk_size > c.getContentLength()) {
+						c.setErrorCode(413);
+						c.setState(PROCESS_REQUEST);
+						break;
+					}
+
+					if (chunk_size == 0) {
+						c.recvBuf().erase(0, crlf + 4);
+						c.setState(PROCESS_REQUEST);
+						break;
+					}
+
+					c.setBody(c.getBody() + c.recvBuf().substr(crlf + 2, chunk_size));
+					c.recvBuf().erase(0, crlf + 2 + chunk_size + 2);
+				}
+				if (c.getState() == PROCESS_REQUEST && c.getErrorCode() == 413) {
+					buildResponse(c);
+					c.setState(WRITE_RESPONSE);
+					modifyEpoll(fd, EPOLLOUT);
+					break;
+				}
 			}
 			else {
-				break;
+				if (c.recvBuf().size() >= c.getContentLength()) {
+					c.setBody(c.recvBuf().substr(0, c.getContentLength()));
+					c.recvBuf().erase(0, c.getContentLength());
+					c.setState(PROCESS_REQUEST);
+				}
+				else {
+					break;
+				}
 			}
 		}
 		else if (c.getState() == PROCESS_REQUEST) {
 			buildResponse(c);
-			c.setState(WRITE_RESPONSE);
-			modifyEpoll(fd, EPOLLOUT);
+			if (c.getState() != PROCESS_CGI) {
+				c.setState(WRITE_RESPONSE);
+				modifyEpoll(fd, EPOLLOUT);
+			}
 			break;
 		}
 		else { break; }

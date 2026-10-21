@@ -1,5 +1,5 @@
 #include "Utils.hpp"
-#include <algorithm> // 3la wdit transform
+#include <algorithm> 
 
 bool	isNumeric(const std::string &s) {
 	if (s.empty()) return false;
@@ -47,7 +47,6 @@ void	parse_http_code(const std::string& nb) {
 		if (code < 100 || code > 599 || nb.size() > 3) throw std::runtime_error("Error_page code (out of range 100-599): '" + nb + "'");
 	} else throw std::runtime_error("Error_page code must be numeric'" + nb + "'");
 }
-
 void	parseCbmz(const std::string& vl) {
 	std::string nb;
 	char last = vl[vl.size() - 1];
@@ -57,7 +56,6 @@ void	parseCbmz(const std::string& vl) {
 	} else if (!isNumeric(vl)) throw std::runtime_error("client_max_body_size: invalid value'" + vl + "'");
 }
 
-// functions used on ConfigLoader (extraction had lmra machi validation)
 
 std::pair<std::string, int> parseListen(const std::string& val) {
 	std::string	ip;
@@ -86,5 +84,51 @@ size_t	parseSize(const std::string& val) {
 	else if (last == 'm' || last == 'M' ) { multiplier = 1024 * 1024; num_str = val.substr(0, val.size() - 1);}
 	else if (last == 'g' || last == 'G' ) {multiplier = 1024 * 1024 * 1024; num_str = val.substr(0, val.size() -1);}
 
+	if (num_str.size() > 10) throw std::runtime_error("Number too large");
 	return static_cast<size_t>(std::atoi(num_str.c_str())) * multiplier;
 }
+
+
+inline int hexCharToInt(unsigned char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return 0;
+}
+
+std::string uriDecodeSinglePass(const std::string& src) {
+    std::string out;
+    out.reserve(src.length());
+    for (std::size_t i = 0; i < src.length(); ++i) {
+        if (src[i] == '%' && i + 2 < src.length()) {
+            unsigned char hex1 = static_cast<unsigned char>(src[i + 1]);
+            unsigned char hex2 = static_cast<unsigned char>(src[i + 2]);
+            if (std::isxdigit(hex1) && std::isxdigit(hex2)) {
+                int value = (hexCharToInt(hex1) << 4) | hexCharToInt(hex2);
+                out += static_cast<char>(value);
+                i += 2;
+            } else {
+                out += src[i];
+            }
+        }
+        else if (src[i] == '+') {
+            out += ' ';
+        }
+        else {
+            out += src[i];
+        }
+    }
+    return out;
+}
+
+std::string safeUriDecode(const std::string& src, int max_times) {
+    std::string current = src;
+    for (int i = 0; i < max_times; ++i) {
+        std::string decoded = uriDecodeSinglePass(current);
+        if (decoded == current)
+            break;
+        current = decoded;
+    }
+    return current;
+}
+

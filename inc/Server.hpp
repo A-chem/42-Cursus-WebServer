@@ -20,6 +20,7 @@
 #include <sys/epoll.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/time.h>
 
 
 // state machine (all the states that we gonna go through in each connection)
@@ -29,6 +30,7 @@ enum State {
 	READ_REQUEST_HEADER,
 	READ_BODY,
 	PROCESS_REQUEST,
+	PROCESS_CGI,
 	WRITE_RESPONSE,
 	CLOSED
 };
@@ -40,7 +42,7 @@ class	Client {
 		std::string	recv_buf;
 		std::string	send_buf;
 		State		state;
-
+		bool		is_chunked;
 		// parsed request (the data came from the client :browser)
 		std::string	method;
 		std::string	path;
@@ -55,9 +57,14 @@ class	Client {
 		size_t	bytes_sent;
 		bool	header_sent;
 		bool	keep_alive;
-
+		time_t	connection_start_time;
+		time_t	last_activity_time;
 	public:
 		std::ifstream	file_stream;
+                // CGI Integration
+                int             cgi_fd;
+                pid_t           cgi_pid;
+                std::string     cgi_raw_output;
 		
 		Client();
 		explicit Client(int fd);
@@ -107,6 +114,15 @@ class	Client {
 		bool		headerSent();
 		size_t		getBytesSent() const;
 		size_t		getFileSize() const;
+
+		// ===== TIMEOUT METHODS =====
+		void		updateActivityTime();
+		time_t		getLastActivityTime() const;
+		int		getTimeoutForState() const;
+		bool		isInactiveFor(int seconds) const;
+		// ============================
+    		void    setIsChunked(bool c);
+    		bool    getIsChunked() const;
 };
 
 
@@ -116,8 +132,14 @@ class Server {
 		std::vector<int>		listenfd;
 		std::map<int, Client*>		clients;
 		std::vector<ServerConfig>	_configs;
-		std::map<int, int>		_fd_to_config;
+		static const int		SOCKET_TIMEOUT = 30;
 
+		std::map<int, std::vector<int> > _fd_to_configs;
+		// MIME type management
+		static std::map<std::string, std::string> g_mimeTypeCache;
+		bool	loadMimeTypes(const std::string& filepath);
+		std::string getMimeType(const std::string& path);
+		std::map<std::string, std::string> _mimeTypeCache;
 		// Socket.cpp methods
 		void	setNonBlocking(int fd);
 		int	createListenSocket(const std::string& host, int port);
@@ -141,6 +163,17 @@ class Server {
 		// ErrorPages.cpp
 		std::string defaultErrorPage(int code, const std::string& msg);
 		std::string buildErrorResponse(int code, const std::string& msg, ServerConfig& srv);
+
+		// NEW METHODS:
+		bool	selectServerByHostname(
+				int listen_fd,
+				const std::string& host_header,
+				ServerConfig*& selected_config);
+		bool	isHostnameMatched(int listen_fd, const std::string& host_header);
+		// for timeout
+		void setSocketTimeout(int fd);
+		void handleCGIRead(int pipe_fd);
+		std::map<int, Client*> cgi_clients;
 
 	public:
 		Server();
